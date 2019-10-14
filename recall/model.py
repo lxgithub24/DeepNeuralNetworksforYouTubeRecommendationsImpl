@@ -7,40 +7,52 @@ from tensorflow.contrib import layers
 from tensorflow.python.ops import nn_impl
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import nn_ops
+from recall.data_process import get_batch, get_total_num
+
+
+class Args:
+    video_total_num = 2
+    search_total_num = 2
+    dnn_depth = 3
+    num_class = 1201
+    learning_rate = 0.01
+    batch_num = 10000
+    epoch = 10
+    checkpoint_dir = '../data/checkpoint_dir/'
 
 
 class RecallModel:
-    def __init__(self, video_total_num, video_embedding_length, search_total_num, search_embedding_length,
-                 dnn_depth, num_class, class_embedding_length, learning_rate):
-        self.video_total_num = video_total_num
-        self.video_embedding_length = video_embedding_length
-        self.search_total_num = search_total_num
-        self.search_embedding_length = search_embedding_length
-        self.depth = dnn_depth
-        self.num_class = num_class
-        self.class_embedding_length = class_embedding_length
+    def __init__(self, args):
+        self.video_total_num = args.video_total_num
+        self.search_total_num = args.search_total_num
+        self.depth = args.dnn_depth
+        self.num_class = args.num_class
         self.num_samples = 100  # 负采样样本数
         self.units_list = [128] * self.depth
-        self.learning_rate = learning_rate
+        self.learning_rate = args.learning_rate
         self.global_step = tf.Variable(0, trainable=False)
+        self.class_distinct = 1201
+        self.batch_num = args.batch_num
         self.init_graph()
 
     def init_graph(self):
-        # 初始化喂入参数
-        self.video_ids = tf.placeholder(tf.int32, shape=[None, None], name='video_ids')
-        self.search_id = tf.placeholder(tf.int32, shape=[None, None], name='search_id')
-        self.age = tf.placeholder(tf.int32, shape=[None], name='age')
-        self.gender = tf.placeholder(tf.int32, shape=[None], name='gender')
-        self.label = tf.placeholder(tf.int32, shape=[None], name='label')
+        # 初始化喂入参数，placeholder名字要唯一，不能更改placeholder的任何信息
+        self.video_ids_ph = tf.placeholder(tf.int32, shape=[None, None], name='video_ids')
+        self.search_id_ph = tf.placeholder(tf.int32, shape=[None], name='search_id')
+        self.age_ph = tf.placeholder(tf.float32, shape=[None], name='age')
+        self.gender_ph = tf.placeholder(tf.float32, shape=[None], name='gender')
+        self.label_ph = tf.placeholder(tf.float32, shape=[None], name='label_ph')
 
         # 初始化视频embedding、搜索条件的embedding，concat两个embedding和age、gender
-        video_embedding = tf.get_variable('video_embedding', shape=[self.video_total_num, self.video_embedding_length],
+        video_embedding = tf.get_variable('video_embedding', shape=[self.video_total_num],
                                           dtype=tf.float32, initializer=tf.variance_scaling_initializer())
-        video_vecs = tf.nn.embedding_lookup(video_embedding, self.video_ids)
+        video_vecs = tf.nn.embedding_lookup(video_embedding, self.video_ids_ph)
         search_embedding = tf.get_variable(name='search_embedding',
-                                           shape=[self.search_total_num, self.search_embedding_length])
-        search_vec = tf.nn.embedding_lookup(search_embedding, self.search_id)
-        input = tf.concat([tf.reduce_mean(video_vecs, axis=0), search_vec, self.age, self.gender], axis=1)
+                                           shape=[self.search_total_num])
+        search_vec = tf.nn.embedding_lookup(search_embedding, self.search_id_ph)
+        input = tf.concat([tf.reshape(tf.reduce_mean(video_vecs, axis=0), shape=[-1, 1]),
+                           tf.reshape(search_vec, shape=[-1, 1]), tf.reshape(self.age_ph, shape=[-1, 1]),
+                                      tf.reshape(self.gender_ph, shape=[-1, 1])], axis=1)
 
         # 经过多层深度训练，层数根据mAP确定
         for i in range(self.depth):
@@ -50,15 +62,20 @@ class RecallModel:
             input = tf.layers.batch_normalization(input, training=True, name='fc{}_bn'.format(i))
 
         # 初始化类别（就是每个视频的标签，对应论文中的百万级）的embedding：weights(这个名字起的很容易误解为权重)。bias
-        weights = tf.get_variable('soft_weight', shape=[self.num_class, self.class_embedding_length],
+        weights = tf.get_variable('soft_weight', shape=[self.batch_num, 128],
                                   initializer=tf.variance_scaling_initializer())
-        biases = tf.get_variable('soft_bias', shape=[self.num_class], initializer=tf.variance_scaling_initializer())
+        biases = tf.get_variable('soft_bias', shape=[self.batch_num], initializer=tf.variance_scaling_initializer())
         # 计算损失, num_true=1代表负采样有一个正例，one-hot值为1。
-        self.logits, labels = nn_impl._compute_sampled_logits(weights=weights, biases=biases, labels=self.label,
+
+        # biases却是一维的
+        # biases = tf.reshape(biases, shape=[-1])
+        # 很奇怪的问题，label必须二维的，但是biases却是一维的
+        self.labels = tf.reshape(self.label_ph, shape=[-1, 1])
+        self.logits, labels = nn_impl._compute_sampled_logits(weights=weights, biases=biases, labels=self.labels,
                                                               inputs=input, num_sampled=100,
-                                                              num_classes=set(self.label).__sizeof__(), num_true=1,
+                                                              num_classes=self.class_distinct, num_true=1,
                                                               sampled_values=None, remove_accidental_hits=True,
-                                                              partition_strategy="mod", name="sampled_softmax_loss",
+                                                              partition_strategy="div", name="sampled_softmax_loss",
                                                               seed=None)
         labels = array_ops.stop_gradient(labels, name="labels_stop_gradient")
         sampled_losses = nn_ops.softmax_cross_entropy_with_logits_v2(labels=labels, logits=self.logits)
@@ -73,7 +90,12 @@ class RecallModel:
 
     def train(self, session, video_ids, search_id, age, gender, label):
         loss, _, step = session.run([self.loss, self.gradient_descent, self.global_step],
-                                    feed_dict={self.video_ids: video_ids, self.search_id: search_id, self.age: age, self.gender: gender, self.label:label})
+                                    feed_dict={self.video_ids_ph: video_ids,
+                                               self.search_id_ph: search_id,
+                                               self.age_ph: age,
+                                               self.gender_ph: gender,
+                                               self.label_ph:label
+                                               })
         return loss, step
 
     def predict(self, session, video_ids, search_id, age, gender):
@@ -88,30 +110,25 @@ class RecallModel:
         tf.train.Saver().restore(session, path)
 
 
-# 获取每批数据
-def get_batch():
-    pass
-    return 1
-
-
 # 运行图
 def run_graph():
-    checkpoint_dir, epoch, batch_num, video_total_num, video_embedding_length, search_total_num, search_embedding_length, dnn_depth, num_class, class_embedding_length, label, learning_rate = []
-    data = {}
+    args = Args()
     # 可以增加gpu使用的设置
     with tf.Session() as session:
-        recall_model = RecallModel(video_total_num, video_embedding_length, search_total_num, search_embedding_length,
-                                   dnn_depth, num_class, class_embedding_length, learning_rate)
+        recall_model = RecallModel(args)
         session.run(tf.global_variables_initializer())
         session.run(tf.local_variables_initializer())
 
-        count = int(len(data['label']) / batch_num)
-        for i in range(epoch):
+        count = int(get_total_num() / args.batch_num) + 1
+        for i in range(args.epoch):
             for j in range(count):
-                video_ids, search_id, age, gender = get_batch()
-                loss, step = recall_model.train(session, video_ids, search_id, age, gender, label)
+                has_more, video_ids_batch, search_ids_batch, age_batch, gender_batch, label_batch = get_batch()
+                if not has_more:
+                    break
+                loss, step = recall_model.train(session, video_ids_batch, search_ids_batch, age_batch, gender_batch, label_batch)
+                print(loss, step)
                 if j % 100 == 0:
-                    recall_model.save(session, checkpoint_dir)
+                    recall_model.save(session, args.checkpoint_dir)
 
 
 if __name__ == '__main__':
