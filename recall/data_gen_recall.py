@@ -4,12 +4,15 @@
 # @desc: TODO:DESC
 import random
 from collections import Counter
+from utils.config import SuperPrams
 
-uid_max = 1242
-video_id_max = 9999
-search_id_max = 100000
-class_id_max = 1200
-feature_id_max = 80000
+uid_max = SuperPrams.user_total_num - 1
+video_id_max = SuperPrams.video_total_num - 1
+# search_id_max = 100000
+search_id_max = SuperPrams.search_total_num - 1
+class_id_max = SuperPrams.class_total_num - 1
+# feature_id_max = 80000
+feature_id_max = SuperPrams.feature_id_total_num - 1
 
 
 # uid
@@ -123,6 +126,7 @@ def get_label(video_id):
     return class_id
 
 
+# 生成最终的特征文件
 def gen_feature(has_label=True):
     def get_sample(i, has_label=True):
         print(i)
@@ -133,10 +137,10 @@ def gen_feature(has_label=True):
         gender = get_gender()
         if not has_label:
             label_list = [str(get_label(i)) for i in range(video_id_max + 1)]
-            with open('../data/videoid_videoclass.txt', 'w') as f:
+            with open('../data/racall/videoid_videoclass.txt', 'w') as f:
                 f.writelines(','.join(label_list))
         else:
-            with open('../data/videoid_videoclass.txt', 'r') as f:
+            with open('../data/racall/videoid_videoclass.txt', 'r') as f:
                 label_list = f.readlines()[0].strip().split(',')
         if len(video_ids):
             count_list = [label_list[int(i)] for i in video_ids]
@@ -146,7 +150,7 @@ def gen_feature(has_label=True):
         return str(uid) + ',' + '#'.join(video_ids) + ',' + '#'.join(search_ids) + ',' + str(age) + ',' + str(
             gender) + ',' + str(y_label)
 
-    with open('../data/feature.txt', 'w') as f:
+    with open('../data/racall/feature.txt', 'w') as f:
         f.writelines('\n'.join([get_sample(i, has_label) for i in range(feature_id_max+1)]))
 
 
